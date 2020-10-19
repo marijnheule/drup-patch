@@ -1,0 +1,281 @@
+diff -rupN minisat/core/Main.cc minisatD/core/Main.cc
+--- minisat/core/Main.cc	2010-07-10 11:07:36.000000000 -0500
++++ minisatD/core/Main.cc	2013-04-08 14:58:35.880535000 -0500
+@@ -130,9 +130,9 @@ int main(int argc, char** argv)
+             printf("============================[ Problem Statistics ]=============================\n");
+             printf("|                                                                             |\n"); }
+         
++        S.output = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+         parse_DIMACS(in, S);
+         gzclose(in);
+-        FILE* res = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+         
+         if (S.verbosity > 0){
+             printf("|  Number of variables:  %12d                                         |\n", S.nVars());
+@@ -149,7 +149,7 @@ int main(int argc, char** argv)
+         signal(SIGXCPU,SIGINT_interrupt);
+        
+         if (!S.simplify()){
+-            if (res != NULL) fprintf(res, "UNSAT\n"), fclose(res);
++            if (S.output != NULL) fprintf(S.output, "0\n"), fclose(S.output);
+             if (S.verbosity > 0){
+                 printf("===============================================================================\n");
+                 printf("Solved by unit propagation\n");
+@@ -165,18 +165,19 @@ int main(int argc, char** argv)
+             printStats(S);
+             printf("\n"); }
+         printf(ret == l_True ? "SATISFIABLE\n" : ret == l_False ? "UNSATISFIABLE\n" : "INDETERMINATE\n");
+-        if (res != NULL){
++        if (S.output != NULL){
+             if (ret == l_True){
+-                fprintf(res, "SAT\n");
++                fclose(S.output);                 // Close the proof file
++                S.output = fopen(argv[2], "wb");  // Clear it to put in the solution
+                 for (int i = 0; i < S.nVars(); i++)
+                     if (S.model[i] != l_Undef)
+-                        fprintf(res, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
+-                fprintf(res, " 0\n");
++                        fprintf(S.output, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
++                fprintf(S.output, " 0\n");
+             }else if (ret == l_False)
+-                fprintf(res, "UNSAT\n");
++                fprintf(S.output, "0\n");
+             else
+-                fprintf(res, "INDET\n");
+-            fclose(res);
++                fprintf(S.output, "INDET\n");
++            fclose(S.output);
+         }
+         
+ #ifdef NDEBUG
+diff -rupN minisat/core/Solver.cc minisatD/core/Solver.cc
+--- minisat/core/Solver.cc	2010-07-10 11:07:36.000000000 -0500
++++ minisatD/core/Solver.cc	2013-03-29 18:01:48.687046000 -0500
+@@ -136,7 +136,17 @@ bool Solver::addClause_(vec<Lit>& ps)
+ 
+     // Check if clause is satisfied and remove false/duplicate literals:
+     sort(ps);
+-    Lit p; int i, j;
++
++    vec<Lit>    oc;
++    oc.clear();
++
++    Lit p; int i, j, flag = 0;
++    for (i = j = 0, p = lit_Undef; i < ps.size(); i++) {
++        oc.push(ps[i]);
++        if (value(ps[i]) == l_True || ps[i] == ~p || value(ps[i]) == l_False)
++          flag = 1;
++    }
++
+     for (i = j = 0, p = lit_Undef; i < ps.size(); i++)
+         if (value(ps[i]) == l_True || ps[i] == ~p)
+             return true;
+@@ -144,6 +154,17 @@ bool Solver::addClause_(vec<Lit>& ps)
+             ps[j++] = p = ps[i];
+     ps.shrink(i - j);
+ 
++    if (flag && (output != NULL)) {
++      for (i = j = 0, p = lit_Undef; i < ps.size(); i++)
++        fprintf(output, "%i ", (var(ps[i]) + 1) * (-2 * sign(ps[i]) + 1));
++      fprintf(output, "0\n");
++
++      fprintf(output, "d ");
++      for (i = j = 0, p = lit_Undef; i < oc.size(); i++)
++        fprintf(output, "%i ", (var(oc[i]) + 1) * (-2 * sign(oc[i]) + 1));
++      fprintf(output, "0\n");
++    }
++
+     if (ps.size() == 0)
+         return ok = false;
+     else if (ps.size() == 1){
+@@ -187,6 +208,14 @@ void Solver::detachClause(CRef cr, bool 
+ 
+ void Solver::removeClause(CRef cr) {
+     Clause& c = ca[cr];
++
++    if (output != NULL) {
++      fprintf(output, "d ");
++      for (int i = 0; i < c.size(); i++)
++        fprintf(output, "%i ", (var(c[i]) + 1) * (-2 * sign(c[i]) + 1));
++      fprintf(output, "0\n");
++    }
++
+     detachClause(cr);
+     // Don't leave pointers to free'd memory!
+     if (locked(c)) vardata[var(c[0])].reason = CRef_Undef;
+@@ -639,6 +668,12 @@ lbool Solver::search(int nof_conflicts)
+                 claBumpActivity(ca[cr]);
+                 uncheckedEnqueue(learnt_clause[0], cr);
+             }
++            if (output != NULL) {
++              for (int i = 0; i < learnt_clause.size(); i++)
++                fprintf(output, "%i " , (var(learnt_clause[i]) + 1) *
++                                  (-2 * sign(learnt_clause[i]) + 1) );
++              fprintf(output, "0\n");
++            }
+ 
+             varDecayActivity();
+             claDecayActivity();
+diff -rupN minisat/core/Solver.h minisatD/core/Solver.h
+--- minisat/core/Solver.h	2010-07-10 11:07:36.000000000 -0500
++++ minisatD/core/Solver.h	2013-03-29 17:06:17.871735000 -0500
+@@ -105,6 +105,9 @@ public:
+     void    checkGarbage(double gf);
+     void    checkGarbage();
+ 
++
++    FILE*               output;
++
+     // Extra results: (read-only member variable)
+     //
+     vec<lbool> model;             // If problem is satisfiable, this vector contains the model (if any).
+diff -rupN minisat/simp/Main.cc minisatD/simp/Main.cc
+--- minisat/simp/Main.cc	2010-07-10 11:07:36.000000000 -0500
++++ minisatD/simp/Main.cc	2013-04-08 14:27:38.401390000 -0500
+@@ -92,6 +92,7 @@ int main(int argc, char** argv)
+         SimpSolver  S;
+         double      initial_time = cpuTime();
+ 
++        S.parsing = 1;
+         if (!pre) S.eliminate(true);
+ 
+         S.verbosity = verb;
+@@ -134,9 +135,9 @@ int main(int argc, char** argv)
+             printf("============================[ Problem Statistics ]=============================\n");
+             printf("|                                                                             |\n"); }
+         
++        S.output = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+         parse_DIMACS(in, S);
+         gzclose(in);
+-        FILE* res = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+ 
+         if (S.verbosity > 0){
+             printf("|  Number of variables:  %12d                                         |\n", S.nVars());
+@@ -151,6 +152,7 @@ int main(int argc, char** argv)
+         signal(SIGINT, SIGINT_interrupt);
+         signal(SIGXCPU,SIGINT_interrupt);
+ 
++        S.parsing = 0;
+         S.eliminate(true);
+         double simplified_time = cpuTime();
+         if (S.verbosity > 0){
+@@ -158,7 +160,7 @@ int main(int argc, char** argv)
+             printf("|                                                                             |\n"); }
+ 
+         if (!S.okay()){
+-            if (res != NULL) fprintf(res, "UNSAT\n"), fclose(res);
++            if (S.output != NULL) fprintf(S.output, "0\n"), fclose(S.output);
+             if (S.verbosity > 0){
+                 printf("===============================================================================\n");
+                 printf("Solved by simplification\n");
+@@ -184,18 +186,19 @@ int main(int argc, char** argv)
+             printStats(S);
+             printf("\n"); }
+         printf(ret == l_True ? "SATISFIABLE\n" : ret == l_False ? "UNSATISFIABLE\n" : "INDETERMINATE\n");
+-        if (res != NULL){
++        if (S.output != NULL){
+             if (ret == l_True){
+-                fprintf(res, "SAT\n");
++                fclose(S.output);                 // Close the proof file
++                S.output = fopen(argv[2], "wb");  // Clear it to put in the solution
+                 for (int i = 0; i < S.nVars(); i++)
+                     if (S.model[i] != l_Undef)
+-                        fprintf(res, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
+-                fprintf(res, " 0\n");
++                        fprintf(S.output, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
++                fprintf(S.output, " 0\n");
+             }else if (ret == l_False)
+-                fprintf(res, "UNSAT\n");
++                fprintf(S.output, "0\n");
+             else
+-                fprintf(res, "INDET\n");
+-            fclose(res);
++                fprintf(S.output, "INDET\n");
++            fclose(S.output);
+         }
+ 
+ #ifdef NDEBUG
+diff -rupN minisat/simp/SimpSolver.cc minisatD/simp/SimpSolver.cc
+--- minisat/simp/SimpSolver.cc	2010-07-10 11:07:36.000000000 -0500
++++ minisatD/simp/SimpSolver.cc	2013-04-08 14:12:29.209426000 -0500
+@@ -147,6 +147,12 @@ bool SimpSolver::addClause_(vec<Lit>& ps
+     if (!Solver::addClause_(ps))
+         return false;
+ 
++    if(!parsing && output != NULL) {
++      for (int i = 0; i < ps.size(); i++)
++        fprintf(output, "%i " , (var(ps[i]) + 1) * (-2 * sign(ps[i]) + 1) );
++      fprintf(output, "0\n");
++    }
++
+     if (use_simplification && clauses.size() == nclauses + 1){
+         CRef          cr = clauses.last();
+         const Clause& c  = ca[cr];
+@@ -197,10 +203,23 @@ bool SimpSolver::strengthenClause(CRef c
+     // if (!find(subsumption_queue, &c))
+     subsumption_queue.insert(cr);
+ 
++    if (output != NULL) {
++      for (int i = 0; i < c.size(); i++)
++        if (c[i] != l) fprintf(output, "%i " , (var(c[i]) + 1) * (-2 * sign(c[i]) + 1) );
++      fprintf(output, "0\n");
++    }
++
+     if (c.size() == 2){
+         removeClause(cr);
+         c.strengthen(l);
+     }else{
++        if (output != NULL) {
++          fprintf(output, "d ");
++          for (int i = 0; i < c.size(); i++)
++            fprintf(output, "%i " , (var(c[i]) + 1) * (-2 * sign(c[i]) + 1) );
++          fprintf(output, "0\n");
++        }
++
+         detachClause(cr, true);
+         c.strengthen(l);
+         attachClause(cr);
+@@ -507,9 +526,6 @@ bool SimpSolver::eliminateVar(Var v)
+         mkElimClause(elimclauses, ~mkLit(v));
+     }
+ 
+-    for (int i = 0; i < cls.size(); i++)
+-        removeClause(cls[i]); 
+-
+     // Produce clauses in cross product:
+     vec<Lit>& resolvent = add_tmp;
+     for (int i = 0; i < pos.size(); i++)
+@@ -517,6 +533,9 @@ bool SimpSolver::eliminateVar(Var v)
+             if (merge(ca[pos[i]], ca[neg[j]], v, resolvent) && !addClause_(resolvent))
+                 return false;
+ 
++    for (int i = 0; i < cls.size(); i++)
++        removeClause(cls[i]);
++
+     // Free occurs list for this variable:
+     occurs[v].clear(true);
+     
+@@ -550,10 +569,10 @@ bool SimpSolver::substitute(Var v, Lit x
+             subst_clause.push(var(p) == v ? x ^ sign(p) : p);
+         }
+ 
+-        removeClause(cls[i]);
+-
+         if (!addClause_(subst_clause))
+             return ok = false;
++
++        removeClause(cls[i]);
+     }
+ 
+     return true;
+diff -rupN minisat/simp/SimpSolver.h minisatD/simp/SimpSolver.h
+--- minisat/simp/SimpSolver.h	2010-07-10 11:07:36.000000000 -0500
++++ minisatD/simp/SimpSolver.h	2013-03-29 17:06:17.899728000 -0500
+@@ -80,6 +80,7 @@ class SimpSolver : public Solver {
+ 
+     // Mode of operation:
+     //
++    int     parsing;
+     int     grow;              // Allow a variable elimination step to grow by a number of clauses (default to zero).
+     int     clause_lim;        // Variables are not eliminated if it produces a resolvent with a length above this limit.
+                                // -1 means no limit.

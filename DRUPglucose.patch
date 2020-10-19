@@ -1,0 +1,312 @@
+diff -rupN glucose2.2/core/Main.cc glucose2.2D/core/Main.cc
+--- glucose2.2/core/Main.cc	2013-03-22 19:37:26.881541000 -0500
++++ glucose2.2D/core/Main.cc	2013-03-26 12:52:01.035627000 -0500
+@@ -151,9 +151,9 @@ int main(int argc, char** argv)
+             printf("c ========================================[ Problem Statistics ]===========================================\n");
+             printf("c |                                                                                                       |\n"); }
+         
++        S.output = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+         parse_DIMACS(in, S);
+         gzclose(in);
+-        FILE* res = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+         
+         if (S.verbosity > 0){
+             printf("c |  Number of variables:  %12d                                                                   |\n", S.nVars());
+@@ -170,7 +170,7 @@ int main(int argc, char** argv)
+         //signal(SIGXCPU,SIGINT_interrupt);
+        
+         if (!S.simplify()){
+-            if (res != NULL) fprintf(res, "UNSAT\n"), fclose(res);
++            if (S.output != NULL) fprintf(S.output, "0\n"), fclose(S.output);
+             if (S.verbosity > 0){
+ 	        printf("c =========================================================================================================\n");
+                 printf("Solved by unit propagation\n");
+@@ -185,18 +185,20 @@ int main(int argc, char** argv)
+         if (S.verbosity > 0){
+             printStats(S);
+             printf("\n"); }
+-        if (res != NULL){
++        if (S.output != NULL){
+             if (ret == l_True){
+-                fprintf(res, "SAT\n");
++                fclose(S.output);                 // Close the proof file
++                S.output = fopen(argv[2], "wb");  // Clear it to put in the solution
++                printf("SAT\n");
+                 for (int i = 0; i < S.nVars(); i++)
+                     if (S.model[i] != l_Undef)
+-                        fprintf(res, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
+-                fprintf(res, " 0\n");
++                        fprintf(S.output, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
++                fprintf(S.output, " 0\n");
+             }else if (ret == l_False)
+-                fprintf(res, "UNSAT\n");
++                fprintf(S.output, "0\n");
+             else
+-                fprintf(res, "INDET\n");
+-            fclose(res);
++                fprintf(S.output, "INDET\n");
++            fclose(S.output);
+         } else {
+         printf(ret == l_True ? "s SATISFIABLE\n" : ret == l_False ? "s UNSATISFIABLE\n" : "s INDETERMINATE\n");
+ 	  if(ret==l_True) {
+diff -rupN glucose2.2/core/Solver.cc glucose2.2D/core/Solver.cc
+--- glucose2.2/core/Solver.cc	2013-03-22 19:37:27.476530000 -0500
++++ glucose2.2D/core/Solver.cc	2013-03-26 12:48:08.115638000 -0500
+@@ -170,7 +170,17 @@ bool Solver::addClause_(vec<Lit>& ps)
+ 
+     // Check if clause is satisfied and remove false/duplicate literals:
+     sort(ps);
+-    Lit p; int i, j;
++
++    vec<Lit>    oc;
++    oc.clear();
++
++    Lit p; int i, j, flag = 0;
++    for (i = j = 0, p = lit_Undef; i < ps.size(); i++) {
++        oc.push(ps[i]);
++        if (value(ps[i]) == l_True || ps[i] == ~p || value(ps[i]) == l_False)
++          flag = 1;
++    }
++
+     for (i = j = 0, p = lit_Undef; i < ps.size(); i++)
+         if (value(ps[i]) == l_True || ps[i] == ~p)
+             return true;
+@@ -178,6 +188,17 @@ bool Solver::addClause_(vec<Lit>& ps)
+             ps[j++] = p = ps[i];
+     ps.shrink(i - j);
+ 
++    if (flag && (output != NULL)) {
++      for (i = j = 0, p = lit_Undef; i < ps.size(); i++)
++        fprintf(output, "%i ", (var(ps[i]) + 1) * (-2 * sign(ps[i]) + 1));
++      fprintf(output, "0\n");
++
++      fprintf(output, "d ");
++      for (i = j = 0, p = lit_Undef; i < oc.size(); i++)
++        fprintf(output, "%i ", (var(oc[i]) + 1) * (-2 * sign(oc[i]) + 1));
++      fprintf(output, "0\n");
++    }
++
+     if (ps.size() == 0)
+         return ok = false;
+     else if (ps.size() == 1){
+@@ -195,6 +216,7 @@ bool Solver::addClause_(vec<Lit>& ps)
+ 
+ void Solver::attachClause(CRef cr) {
+     const Clause& c = ca[cr];
++
+     assert(c.size() > 1);
+     if(c.size()==2) {
+       watchesBin[~c[0]].push(Watcher(cr, c[1]));
+@@ -237,12 +259,20 @@ void Solver::detachClause(CRef cr, bool 
+ 
+ 
+ void Solver::removeClause(CRef cr) {
+-  
++
+   Clause& c = ca[cr];
++
++  if (output != NULL) {
++    fprintf(output, "d ");
++    for (int i = 0; i < c.size(); i++)
++      fprintf(output, "%i ", (var(c[i]) + 1) * (-2 * sign(c[i]) + 1));
++    fprintf(output, "0\n");
++  }
++
+   detachClause(cr);
+   // Don't leave pointers to free'd memory!
+   if (locked(c)) vardata[var(c[0])].reason = CRef_Undef;
+-  c.mark(1); 
++  c.mark(1);
+   ca.free(cr);
+ }
+ 
+@@ -904,7 +934,14 @@ lbool Solver::search(int nof_conflicts)
+ 	    sumLBD += nblevels;
+  
+ 
+-           cancelUntil(backtrack_level);
++            cancelUntil(backtrack_level);
++
++            if (output != NULL) {
++              for (int i = 0; i < learnt_clause.size(); i++)
++                fprintf(output, "%i " , (var(learnt_clause[i]) + 1) *
++                            (-2 * sign(learnt_clause[i]) + 1) );
++              fprintf(output, "0\n");
++            }
+ 
+             if (learnt_clause.size() == 1){
+ 	      uncheckedEnqueue(learnt_clause[0]);nbUn++;
+diff -rupN glucose2.2/core/Solver.h glucose2.2D/core/Solver.h
+--- glucose2.2/core/Solver.h	2013-03-22 19:37:27.776528000 -0500
++++ glucose2.2D/core/Solver.h	2013-03-26 11:19:28.200821000 -0500
+@@ -116,6 +116,9 @@ public:
+     void    checkGarbage(double gf);
+     void    checkGarbage();
+ 
++
++    FILE*               output;
++
+     // Extra results: (read-only member variable)
+     //
+     vec<lbool> model;             // If problem is satisfiable, this vector contains the model (if any).
+diff -rupN glucose2.2/simp/Main.cc glucose2.2D/simp/Main.cc
+--- glucose2.2/simp/Main.cc	2013-03-22 19:37:30.708551000 -0500
++++ glucose2.2D/simp/Main.cc	2013-03-26 12:52:46.100143000 -0500
+@@ -114,6 +114,7 @@ int main(int argc, char** argv)
+         SimpSolver  S;
+         double      initial_time = cpuTime();
+ 
++        S.parsing = 1;
+         if (!pre) S.eliminate(true);
+ 
+         S.verbosity = verb;
+@@ -156,9 +157,9 @@ int main(int argc, char** argv)
+             printf("c ========================================[ Problem Statistics ]===========================================\n");
+             printf("c |                                                                                                       |\n"); }
+         
++        S.output = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+         parse_DIMACS(in, S);
+         gzclose(in);
+-        FILE* res = (argc >= 3) ? fopen(argv[2], "wb") : NULL;
+ 
+        if (S.verbosity > 0){
+             printf("c |  Number of variables:  %12d                                                                   |\n", S.nVars());
+@@ -174,6 +175,7 @@ int main(int argc, char** argv)
+         signal(SIGINT, SIGINT_interrupt);
+         signal(SIGXCPU,SIGINT_interrupt);
+ 
++        S.parsing = 0;
+         S.eliminate(true);
+         double simplified_time = cpuTime();
+         if (S.verbosity > 0){
+@@ -181,7 +183,7 @@ int main(int argc, char** argv)
+             printf("c |                                                                                                       |\n"); }
+ 
+         if (!S.okay()){
+-            if (res != NULL) fprintf(res, "UNSAT\n"), fclose(res);
++            if (S.output != NULL) fprintf(S.output, "0\n"), fclose(S.output);
+             if (S.verbosity > 0){
+  	        printf("c =========================================================================================================\n");
+                printf("Solved by simplification\n");
+@@ -207,18 +209,18 @@ int main(int argc, char** argv)
+             printStats(S);
+             printf("\n"); }
+         printf(ret == l_True ? "s SATISFIABLE\n" : ret == l_False ? "s UNSATISFIABLE\n" : "s INDETERMINATE\n");
+-        if (res != NULL){
++        if (S.output != NULL){
+             if (ret == l_True){
+-                fprintf(res, "SAT\n");
++                printf("SAT\n");
+                 for (int i = 0; i < S.nVars(); i++)
+                     if (S.model[i] != l_Undef)
+-                        fprintf(res, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
+-                fprintf(res, " 0\n");
++                        fprintf(S.output, "%s%s%d", (i==0)?"":" ", (S.model[i]==l_True)?"":"-", i+1);
++                fprintf(S.output, " 0\n");
+             }else if (ret == l_False)
+-                fprintf(res, "UNSAT\n");
++                fprintf(S.output, "0\n");
+             else
+-                fprintf(res, "INDET\n");
+-            fclose(res);
++                fprintf(S.output, "INDET\n");
++            fclose(S.output);
+         }
+ 
+ #ifdef NDEBUG
+diff -rupN glucose2.2/simp/SimpSolver.cc glucose2.2D/simp/SimpSolver.cc
+--- glucose2.2/simp/SimpSolver.cc	2013-03-22 19:37:31.148552000 -0500
++++ glucose2.2D/simp/SimpSolver.cc	2013-03-26 12:32:00.276121000 -0500
+@@ -138,7 +138,6 @@ bool SimpSolver::addClause_(vec<Lit>& ps
+     for (int i = 0; i < ps.size(); i++)
+         assert(!isEliminated(var(ps[i])));
+ #endif
+-
+     int nclauses = clauses.size();
+ 
+     if (use_rcheck && implied(ps))
+@@ -147,6 +146,12 @@ bool SimpSolver::addClause_(vec<Lit>& ps
+     if (!Solver::addClause_(ps))
+         return false;
+ 
++    if(!parsing && output != NULL) {
++      for (int i = 0; i < ps.size(); i++)
++        fprintf(output, "%i " , (var(ps[i]) + 1) * (-2 * sign(ps[i]) + 1) );
++      fprintf(output, "0\n");
++    }
++
+     if (use_simplification && clauses.size() == nclauses + 1){
+         CRef          cr = clauses.last();
+         const Clause& c  = ca[cr];
+@@ -197,10 +202,23 @@ bool SimpSolver::strengthenClause(CRef c
+     // if (!find(subsumption_queue, &c))
+     subsumption_queue.insert(cr);
+ 
++    if (output != NULL) {
++      for (int i = 0; i < c.size(); i++)
++        if (c[i] != l) fprintf(output, "%i " , (var(c[i]) + 1) * (-2 * sign(c[i]) + 1) );
++      fprintf(output, "0\n");
++    }
++
+     if (c.size() == 2){
+         removeClause(cr);
+         c.strengthen(l);
+     }else{
++        if (output != NULL) {
++          fprintf(output, "d ");
++          for (int i = 0; i < c.size(); i++)
++            fprintf(output, "%i " , (var(c[i]) + 1) * (-2 * sign(c[i]) + 1) );
++          fprintf(output, "0\n");
++        }
++
+         detachClause(cr, true);
+         c.strengthen(l);
+         attachClause(cr);
+@@ -507,9 +525,6 @@ bool SimpSolver::eliminateVar(Var v)
+         mkElimClause(elimclauses, ~mkLit(v));
+     }
+ 
+-    for (int i = 0; i < cls.size(); i++)
+-        removeClause(cls[i]); 
+-
+     // Produce clauses in cross product:
+     vec<Lit>& resolvent = add_tmp;
+     for (int i = 0; i < pos.size(); i++)
+@@ -517,9 +532,12 @@ bool SimpSolver::eliminateVar(Var v)
+             if (merge(ca[pos[i]], ca[neg[j]], v, resolvent) && !addClause_(resolvent))
+                 return false;
+ 
++    for (int i = 0; i < cls.size(); i++)
++        removeClause(cls[i]);
++
+     // Free occurs list for this variable:
+     occurs[v].clear(true);
+-    
++
+     // Free watchers lists for this variable, if possible:
+     if (watches[ mkLit(v)].size() == 0) watches[ mkLit(v)].clear(true);
+     if (watches[~mkLit(v)].size() == 0) watches[~mkLit(v)].clear(true);
+@@ -550,10 +568,10 @@ bool SimpSolver::substitute(Var v, Lit x
+             subst_clause.push(var(p) == v ? x ^ sign(p) : p);
+         }
+ 
+-        removeClause(cls[i]);
+-
+         if (!addClause_(subst_clause))
+             return ok = false;
++
++        removeClause(cls[i]);
+     }
+ 
+     return true;
+diff -rupN glucose2.2/simp/SimpSolver.h glucose2.2D/simp/SimpSolver.h
+--- glucose2.2/simp/SimpSolver.h	2013-03-22 19:37:31.340552000 -0500
++++ glucose2.2D/simp/SimpSolver.h	2013-03-26 12:37:09.231903000 -0500
+@@ -80,6 +80,7 @@ class SimpSolver : public Solver {
+ 
+     // Mode of operation:
+     //
++    int     parsing;
+     int     grow;              // Allow a variable elimination step to grow by a number of clauses (default to zero).
+     int     clause_lim;        // Variables are not eliminated if it produces a resolvent with a length above this limit.
+                                // -1 means no limit.

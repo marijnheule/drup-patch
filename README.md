@@ -1,7 +1,7 @@
 # drup-patch
 A patch to allow DRUP proof logging in MiniSAT based solvers
 
-We implemented an improved checker, called <A href="http://www.cs.utexas.edu/~marijn/drat-trim/">DRAT-trim</A>,
+We implemented an improved checker, called <A href="https://github.com/marijnheule/drat-trim">DRAT-trim</A>,
 which is backwards compatible with DRUP-trim, faster than DRUP-trim, and contains several new features.
 For example, DRAT-trim can validate proofs with extended resolution. We advice users of DRUP-trim to
 upgrade to DRAT-trim.
